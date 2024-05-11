@@ -62,14 +62,12 @@ type order struct {
 func main() {
 	natsCon, err := nats.Connect("nats://localhost:4223")
 	if err != nil {
-		fmt.Printf("Failed to connect to NATS Streaming server: %s", err.Error())
-		return
+		panic(fmt.Sprintf("Failed to connect to NATS Streaming server: %s", err.Error()))
 	}
 
 	stanCon, err := stan.Connect("test-cluster", "test-user", stan.NatsConn(natsCon))
 	if err != nil {
-		fmt.Printf("Failed to connect to NATS Streaming channel: %s", err.Error())
-		return
+		panic(fmt.Sprintf("Failed to connect to NATS Streaming channel: %s", err.Error()))
 	}
 
 	defer stanCon.Close()

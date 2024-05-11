@@ -67,16 +67,17 @@ type order struct {
 var cache = make(map[string]order)
 
 func main() {
-	conf := newConf()
-	natsCon, stanCon, subscribeNats := natsStreamingConnect(connectDB(conf))
-	cacheRecovery(connectDB(conf))
-	handler(conf)
+	config := newConf()
+	db_con := db_connect(config)
+	natsCon, stanCon, subscribeNats := natsStreamingConnect(db_con)
+	cacheRecovery(db_con)
+	handler(config)
 	natsCon.Close()
 	stanCon.Close()
 	subscribeNats.Unsubscribe()
 }
 
-func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscription) {
+func natsStreamingConnect(db_connect *sql.DB) (*nats.Conn, stan.Conn, stan.Subscription) {
 
 	natsCon, err := nats.Connect("nats://localhost:4223")
 	if err != nil {
@@ -122,7 +123,7 @@ func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscr
 		mutex.Lock()
 		cache[newOrder.OrderUID] = newOrder
 
-		connectDB.QueryRow(fmt.Sprintf(`INSERT INTO "orders" ("order_id","order_info") VALUES('%s','%s')`, newOrder.OrderUID, newOrderInfo))
+		db_connect.QueryRow(fmt.Sprintf(`INSERT INTO "orders" ("order_id","order_info") VALUES('%s','%s')`, newOrder.OrderUID, newOrderInfo))
 		log.Printf("Added order uid: %s", newOrder.OrderUID)
 
 		mutex.Unlock()
@@ -138,9 +139,9 @@ func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscr
 }
 
 // Recovery data to cache from a database
-func cacheRecovery(connectDB *sql.DB) {
+func cacheRecovery(db_connect *sql.DB) {
 
-	orders, err := connectDB.Query(`SELECT "order_id", "order_info" FROM orders`)
+	orders, err := db_connect.Query(`SELECT "order_id", "order_info" FROM orders`)
 	if err != nil {
 		log.Println(err.Error())
 	}
@@ -190,16 +191,34 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 
 	uuid := r.FormValue("uuid")
 
-	var orderJson []byte
-	_, ok := cache[uuid]
+	orderJson := jsonFormattingOrder(uuid)
 
-	//Checking the received key for availability in the cache
-	switch {
-	case uuid == "":
-		orderJson = []byte("Введите id")
-	case !ok:
-		orderJson = []byte("Введен неверный id")
-	default:
+	template, _ = template.ParseFiles("web/main.html")
+
+	err = template.Execute(w, orderJson)
+	if err != nil {
+		log.Printf("Failed to execute template: %v\n", err)
+	}
+}
+
+// Checking the received key for availability in the cache
+func getOrderFromCache(uuid string) ([]byte, bool) {
+	if uuid == "" {
+		return []byte("Введите id"), false
+	}
+	_, ok := cache[uuid]
+	if !ok {
+		return []byte("Введен неверный id"), false
+	}
+	return []byte(uuid), true
+}
+
+func jsonFormattingOrder(uuid string) string {
+	var orderJson string
+	answer, ok := getOrderFromCache(uuid)
+	if !ok {
+		orderJson = string(answer)
+	} else {
 		order := cache[uuid]
 		orderJsonNoFormat, err := json.Marshal(order)
 		if err != nil {
@@ -210,17 +229,11 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 		err = json.Indent(&orderJsonFormat, orderJsonNoFormat, "", " ")
 		if err != nil {
 			log.Printf("JSON parse error: %s", err.Error())
-			return
+			return ""
 		}
-		orderJson = orderJsonFormat.Bytes()
+		orderJson = string(orderJsonFormat.Bytes())
 	}
-
-	template, _ = template.ParseFiles("web/main.html")
-
-	err = template.Execute(w, string(orderJson))
-	if err != nil {
-		log.Printf("Failed to execute template: %v\n", err)
-	}
+	return orderJson
 }
 
 // Checking the server operation
