@@ -58,6 +58,7 @@ type order struct {
 	OofShard          string `json:"oof_shard"`
 }
 
+// script for publishing data on the channel
 func main() {
 	natsCon, err := nats.Connect("nats://localhost:4223")
 	if err != nil {
@@ -80,6 +81,7 @@ func main() {
 
 	var orders []order
 
+	//reading a list of all orders
 	err = json.Unmarshal(fileOrders, &orders)
 	if err != nil {
 		panic(fmt.Sprintf("json decoding failed: %s", err.Error()))
@@ -87,6 +89,7 @@ func main() {
 
 	for _, order := range orders {
 
+		//pull orders into the channel one at a time
 		orderByte, err := json.Marshal(order)
 		if err != nil {
 			panic(fmt.Sprintf("json coding failed: %s", err.Error()))

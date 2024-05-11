@@ -80,13 +80,13 @@ func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscr
 
 	natsCon, err := nats.Connect("nats://localhost:4223")
 	if err != nil {
-		fmt.Printf("Failed to connect to NATS Streaming server: %s", err.Error())
+		log.Printf("Failed to connect to NATS Streaming server: %s", err.Error())
 		return nil, nil, nil
 	}
 
 	stanCon, err := stan.Connect("test-cluster", "test-user1", stan.NatsConn(natsCon))
 	if err != nil {
-		fmt.Printf("Failed to connect to NATS Streaming channel: %s", err.Error())
+		log.Printf("Failed to connect to NATS Streaming channel: %s", err.Error())
 		return nil, nil, nil
 	}
 
@@ -96,16 +96,18 @@ func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscr
 
 		var newOrder order
 
+		//receiving an order from a channel
 		err := json.Unmarshal(message.Data, &newOrder)
 		if err != nil {
-			fmt.Printf("Failed to parse JSON: %s", err.Error())
+			log.Printf("Failed to parse JSON: %s", err.Error())
 		}
 
+		//order validation
 		validate := validator.New()
 
 		err = validate.Struct(newOrder)
 		if err != nil {
-			fmt.Printf("Failed to validate JSON: %s", err.Error())
+			log.Printf("Failed to validate JSON: %s", err.Error())
 			return
 		}
 
@@ -116,42 +118,50 @@ func natsStreamingConnect(connectDB *sql.DB) (*nats.Conn, stan.Conn, stan.Subscr
 
 		var mutex sync.Mutex
 
+		//adding an address to the cache and database
 		mutex.Lock()
 		cache[newOrder.OrderUID] = newOrder
 
 		connectDB.QueryRow(fmt.Sprintf(`INSERT INTO "orders" ("order_id","order_info") VALUES('%s','%s')`, newOrder.OrderUID, newOrderInfo))
+		log.Printf("Added order uid: %s", newOrder.OrderUID)
+
 		mutex.Unlock()
 
+		//Durable subscription so as not to lose data due to connection problems, etc.
 	}, stan.DurableName("my-durable"))
 
 	if err != nil {
-		fmt.Printf("Failed to subscribe to NATS Streaming channel: %s", err.Error())
+		log.Printf("Failed to subscribe to NATS Streaming channel: %s", err.Error())
 		return nil, nil, nil
 	}
 	return natsCon, stanCon, subscribeNats
 }
 
+// Recovery data to cache from a database
 func cacheRecovery(connectDB *sql.DB) {
 
 	orders, err := connectDB.Query(`SELECT "order_id", "order_info" FROM orders`)
 	if err != nil {
-		fmt.Println(err.Error())
+		log.Println(err.Error())
 	}
 
+	var orderCounter int
 	for orders.Next() {
 		var orderID string
 		var orderInfo []byte
 		var order order
 		err = orders.Scan(&orderID, &orderInfo)
 		if err != nil {
-			fmt.Printf("Failed to scan orders: %s", err.Error())
+			log.Printf("Failed to scan orders: %s", err.Error())
 		}
 		err := json.Unmarshal(orderInfo, &order)
 		if err != nil {
-			fmt.Printf("Failed to parse JSON: %s", err.Error())
+			log.Printf("Failed to parse JSON: %s", err.Error())
 		}
 		cache[orderID] = order
+		orderCounter++
 	}
+	log.Printf("Cache recovery. Recovery: %v orders", orderCounter)
 }
 
 func handler(conf setting) {
@@ -171,10 +181,11 @@ func handler(conf setting) {
 	}
 }
 
+// Outputting data to an html form
 func getOrder(w http.ResponseWriter, r *http.Request) {
 	template, err := template.ParseFiles("web/main.html")
 	if err != nil {
-		fmt.Printf("Parse html file error: %s", err.Error())
+		log.Printf("Parse html file error: %s", err.Error())
 	}
 
 	uuid := r.FormValue("uuid")
@@ -182,6 +193,7 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 	var orderJson []byte
 	_, ok := cache[uuid]
 
+	//Checking the received key for availability in the cache
 	switch {
 	case uuid == "":
 		orderJson = []byte("Введите id")
@@ -194,9 +206,10 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 			panic(fmt.Sprintf("json coding failed: %s", err.Error()))
 		}
 		var orderJsonFormat bytes.Buffer
+		//json formatting
 		err = json.Indent(&orderJsonFormat, orderJsonNoFormat, "", " ")
 		if err != nil {
-			log.Println("JSON parse error: ", err.Error())
+			log.Printf("JSON parse error: %s", err.Error())
 			return
 		}
 		orderJson = orderJsonFormat.Bytes()
@@ -206,10 +219,11 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 
 	err = template.Execute(w, string(orderJson))
 	if err != nil {
-		fmt.Printf("Failed to execute template: %v\n", err)
+		log.Printf("Failed to execute template: %v\n", err)
 	}
 }
 
+// Checking the server operation
 func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "The server is working correctly")
 }
