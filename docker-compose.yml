@@ -1,0 +1,18 @@
+version: '3.5'
+
+services:
+  db_auth:
+    container_name: db_auth
+    ports:
+      - "5435:5432"
+    environment:
+      - POSTGRES_PASSWORD=wbpassword
+      - POSTGRES_USER=wbAdmin
+    image: postgres:14.3-alpine
+  
+  nats-streaming:
+    container_name: nats-streaming
+    ports:
+      - "4223:4222"
+    image: nats-streaming:0.25.6-linux
+

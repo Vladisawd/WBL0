@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receiving a order by UID</title>
+</head>
+<body>
+    <form action="/receiving" method="get">
+        <input type="text" name="uuid" id="uuid" placeholder="Enter UID"
+        class="form-control"><br>
+        <button class="btn btn-warning">Get</button>
+    </form>
+    <code>
+        <pre>{{.}}</pre>
+    </code>
+</body>
+</html>
