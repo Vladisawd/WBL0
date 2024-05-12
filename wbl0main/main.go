@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -67,33 +68,89 @@ type order struct {
 var cache = make(map[string]order)
 
 func main() {
-	config := newConf()
-	db_con := db_connect(config)
-	natsCon, stanCon, subscribeNats := natsStreamingConnect(db_con)
-	cacheRecovery(db_con)
-	handler(config)
-	natsCon.Close()
-	stanCon.Close()
-	subscribeNats.Unsubscribe()
-}
+	config := newConfig()
+	connect := dbConnect(config)
 
-func natsStreamingConnect(db_connect *sql.DB) (*nats.Conn, stan.Conn, stan.Subscription) {
-
-	natsCon, err := nats.Connect("nats://localhost:4223")
+	err := restoreCacheFromDb(connect)
 	if err != nil {
-		log.Printf("Failed to connect to NATS Streaming server: %s", err.Error())
-		return nil, nil, nil
+		log.Fatalf(err.Error())
 	}
 
-	stanCon, err := stan.Connect("test-cluster", "test-user1", stan.NatsConn(natsCon))
+	closeNatsStreamingProcess, err := natsStreamingConnect(recordingAnOrder(connect), config)
 	if err != nil {
-		log.Printf("Failed to connect to NATS Streaming channel: %s", err.Error())
-		return nil, nil, nil
+		log.Fatalf(err.Error())
+	}
+
+	defer closeNatsStreamingProcess()
+
+	err = HandlerServer(config).ListenAndServe()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("Unexpected server shutdown: %s", err.Error())
+	}
+}
+
+// Recovery data to cache from a database
+func restoreCacheFromDb(connect *sql.DB) error {
+
+	orders, err := connect.Query(`SELECT "order_id", "order_info" FROM orders`)
+	if err != nil {
+		return errors.New("сannot read data from database: " + err.Error())
+	}
+	defer func(orders *sql.Rows) {
+		_ = orders.Close()
+	}(orders)
+
+	var orderCounter int
+	for orders.Next() {
+		var orderID string
+		var orderInfo []byte
+		var order order
+		err = orders.Scan(&orderID, &orderInfo)
+		if err != nil {
+			return errors.New("Failed to scan orders: " + err.Error())
+		}
+		err := json.Unmarshal(orderInfo, &order)
+		if err != nil {
+			return errors.New("Failed to parse JSON: " + err.Error())
+		}
+		cache[orderID] = order
+		orderCounter++
+	}
+	log.Printf("Cache recovery. Recovery: %v orders", orderCounter)
+	return nil
+}
+
+func natsStreamingConnect(recordingAnOrder func(message *stan.Msg), config setting) (func(), error) {
+
+	natsCon, err := nats.Connect(fmt.Sprintf("nats://%s", config.Nats.Server))
+	if err != nil {
+		return nil, errors.New("Failed to connect to NATS Streaming server: " + err.Error())
+	}
+
+	stanCon, err := stan.Connect(config.Nats.StanClusterID, config.Nats.ClientID, stan.NatsConn(natsCon))
+	if err != nil {
+		return nil, errors.New("Failed to connect to NATS Streaming channel: " + err.Error())
 	}
 
 	stanCon.NatsConn().AuthRequired()
 
-	subscribeNats, err := stanCon.Subscribe("test-channel", func(message *stan.Msg) {
+	//Durable subscription so as not to lose data due to connection problems, etc.
+	subscribeNats, err := stanCon.Subscribe(config.Nats.SubscribeSubject, recordingAnOrder, stan.DurableName(config.Nats.SubscribeDurableName))
+	if err != nil {
+		return nil, errors.New("Failed to subscribe to NATS Streaming channel: " + err.Error())
+	}
+
+	closeFunc := func() {
+		natsCon.Close()
+		stanCon.Close()
+		subscribeNats.Unsubscribe()
+	}
+
+	return closeFunc, nil
+}
+
+func recordingAnOrder(connect *sql.DB) func(message *stan.Msg) {
+	return func(message *stan.Msg) {
 
 		var newOrder order
 
@@ -117,76 +174,45 @@ func natsStreamingConnect(db_connect *sql.DB) (*nats.Conn, stan.Conn, stan.Subsc
 			panic(fmt.Sprintf("json coding failed: %s", err.Error()))
 		}
 
-		var mutex sync.Mutex
+		_, ok := cache[newOrder.OrderUID]
+		if !ok {
+			var mutex sync.Mutex
 
-		//adding an address to the cache and database
-		mutex.Lock()
-		cache[newOrder.OrderUID] = newOrder
+			//adding an address to the cache and database
+			mutex.Lock()
+			cache[newOrder.OrderUID] = newOrder
 
-		db_connect.QueryRow(fmt.Sprintf(`INSERT INTO "orders" ("order_id","order_info") VALUES('%s','%s')`, newOrder.OrderUID, newOrderInfo))
-		log.Printf("Added order uid: %s", newOrder.OrderUID)
+			connect.QueryRow(fmt.Sprintf(`INSERT INTO "orders" ("order_id","order_info") VALUES('%s','%s')`, newOrder.OrderUID, newOrderInfo))
+			log.Printf("Added order uid: %s", newOrder.OrderUID)
 
-		mutex.Unlock()
-
-		//Durable subscription so as not to lose data due to connection problems, etc.
-	}, stan.DurableName("my-durable"))
-
-	if err != nil {
-		log.Printf("Failed to subscribe to NATS Streaming channel: %s", err.Error())
-		return nil, nil, nil
+			mutex.Unlock()
+		} else {
+			log.Printf("The order under uid: %s is already in the database", newOrder.OrderUID)
+			return
+		}
 	}
-	return natsCon, stanCon, subscribeNats
 }
 
-// Recovery data to cache from a database
-func cacheRecovery(db_connect *sql.DB) {
-
-	orders, err := db_connect.Query(`SELECT "order_id", "order_info" FROM orders`)
-	if err != nil {
-		log.Println(err.Error())
-	}
-
-	var orderCounter int
-	for orders.Next() {
-		var orderID string
-		var orderInfo []byte
-		var order order
-		err = orders.Scan(&orderID, &orderInfo)
-		if err != nil {
-			log.Printf("Failed to scan orders: %s", err.Error())
-		}
-		err := json.Unmarshal(orderInfo, &order)
-		if err != nil {
-			log.Printf("Failed to parse JSON: %s", err.Error())
-		}
-		cache[orderID] = order
-		orderCounter++
-	}
-	log.Printf("Cache recovery. Recovery: %v orders", orderCounter)
-}
-
-func handler(conf setting) {
+func HandlerServer(config setting) *http.Server {
 	mx := http.NewServeMux()
+
+	mx.HandleFunc("/receiving", GetOrder)
+	mx.HandleFunc("/health_check", HealthCheckHandler)
+
 	srv := &http.Server{
-		Addr:    conf.Server,
+		Addr:    config.HttpServer,
 		Handler: mx,
 	}
 
-	mx.HandleFunc("/receiving", getOrder)
-	mx.HandleFunc("/health_check", healthCheckHandler)
-
-	log.Printf("Server: %s is running.", conf.Server)
-	err := srv.ListenAndServe()
-	if err != nil {
-		log.Fatal(err)
-	}
+	return srv
 }
 
 // Outputting data to an html form
-func getOrder(w http.ResponseWriter, r *http.Request) {
+func GetOrder(w http.ResponseWriter, r *http.Request) {
 	template, err := template.ParseFiles("web/main.html")
 	if err != nil {
-		log.Printf("Parse html file error: %s", err.Error())
+		http.Error(w, "Parse html file error: "+err.Error(), 400)
+		return
 	}
 
 	uuid := r.FormValue("uuid")
@@ -197,46 +223,51 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 
 	err = template.Execute(w, orderJson)
 	if err != nil {
-		log.Printf("Failed to execute template: %v\n", err)
+		http.Error(w, "Failed to execute temp: "+err.Error(), 400)
+		return
 	}
 }
 
 // Checking the received key for availability in the cache
-func getOrderFromCache(uuid string) ([]byte, bool) {
+func isValidOrderUuid(uuid string) (bool, error) {
 	if uuid == "" {
-		return []byte("Введите id"), false
+		return false, errors.New("enter uid")
 	}
 	_, ok := cache[uuid]
 	if !ok {
-		return []byte("Введен неверный id"), false
+		return false, errors.New("there is no such uid, enter another one")
 	}
-	return []byte(uuid), true
+	return true, nil
 }
 
 func jsonFormattingOrder(uuid string) string {
-	var orderJson string
-	answer, ok := getOrderFromCache(uuid)
+	ok, err := isValidOrderUuid(uuid)
 	if !ok {
-		orderJson = string(answer)
-	} else {
-		order := cache[uuid]
-		orderJsonNoFormat, err := json.Marshal(order)
-		if err != nil {
-			panic(fmt.Sprintf("json coding failed: %s", err.Error()))
-		}
-		var orderJsonFormat bytes.Buffer
-		//json formatting
-		err = json.Indent(&orderJsonFormat, orderJsonNoFormat, "", " ")
-		if err != nil {
-			log.Printf("JSON parse error: %s", err.Error())
-			return ""
-		}
-		orderJson = string(orderJsonFormat.Bytes())
+		return err.Error()
 	}
-	return orderJson
+
+	order := cache[uuid]
+	orderJsonNoFormat, err := json.Marshal(order)
+
+	if err != nil {
+		panic(fmt.Sprintf("json coding failed: %s", err.Error()))
+	}
+
+	var orderJsonFormat bytes.Buffer
+
+	//json formatting
+	err = json.Indent(&orderJsonFormat, orderJsonNoFormat, "", " ")
+
+	if err != nil {
+		log.Printf("JSON parse error: %s", err.Error())
+		return ""
+	}
+
+	return string(orderJsonFormat.Bytes())
 }
 
 // Checking the server operation
-func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "The server is working correctly")
+func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(200)
+	_, _ = w.Write([]byte("."))
 }

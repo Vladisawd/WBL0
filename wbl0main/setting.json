@@ -1,0 +1,17 @@
+{
+    "HttpServer": "localhost:8080",
+    "Postgres": {
+        "PgHost": "127.0.0.1",
+        "PgPort": "5435",
+     "PgUser": "wbAdmin",
+        "PgPassword": "wbpassword",
+     "PgBase": "wbAdmin"
+      },
+      "Nats": {
+        "Server": "localhost:4223",
+        "StanClusterID": "test-cluster",
+        "ClientID": "test-user1",
+        "SubscribeSubject": "test-channel",
+        "SubscribeDurableName": "my-durable"
+      }
+}

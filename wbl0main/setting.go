@@ -7,17 +7,26 @@ import (
 )
 
 type setting struct {
-	Server     string
-	PgHost     string
-	PgPort     string
-	PgUser     string
-	PgPassword string
-	PgBase     string
+	HttpServer string
+	Postgres   struct {
+		PgHost     string
+		PgPort     string
+		PgUser     string
+		PgPassword string
+		PgBase     string
+	}
+	Nats struct {
+		Server               string
+		StanClusterID        string
+		ClientID             string
+		SubscribeSubject     string
+		SubscribeDurableName string
+	}
 }
 
-func newConf() setting {
+func newConfig() setting {
 
-	file, err := os.Open("setting.cfg")
+	file, err := os.Open("setting.json")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to open file %s", err.Error()))
 	}
@@ -36,12 +45,12 @@ func newConf() setting {
 		panic(fmt.Sprintf("Failed to read configuration file %s", err.Error()))
 	}
 
-	var conf setting
+	var config setting
 
-	err = json.Unmarshal(fileByte, &conf)
+	err = json.Unmarshal(fileByte, &config)
 	if err != nil {
 		panic(fmt.Sprintf("Don't count data %s", err.Error()))
 	}
 
-	return conf
+	return config
 }
